@@ -303,6 +303,103 @@ function setupApp(app: td.Application) {
   app.renderer.defineTheme("tsdocs", CustomTheme);
 }
 
+async function getRepoInfo(packageName = "", packageVersion = "") {
+  let userName = "";
+  const npmPackageInfo = await fetch(
+    `https://registry.npmjs.org/${packageName}/${packageVersion}`,
+  );
+  const {
+    repository,
+  }: { repository: { type: string; url: string; directory: string } } =
+    await npmPackageInfo.json();
+  userName = repository.url
+    .replace(/^(git\+https\:\/\/github.com\/)/, "")
+    .replace(/(\/(\w)+\.git)$/, "");
+  return {
+    userName,
+    ...repository,
+  };
+}
+
+async function updateReadmeRelativeLinks(
+  obj: td.Models.ProjectReflection,
+  packageName = "",
+  packageVersion = "",
+) {
+  const relativeUrlRegex = new RegExp(
+    /(["|'|\()]((\.\/|(\.\.\/)+)[\w-_]+\.[\w]{1,5})["|'|\)])/g,
+  );
+  let { readme } = obj;
+  const matcheDict = new Map<string, string>();
+
+  const { userName, directory: packageRoot } = await getRepoInfo(
+    packageName,
+    packageVersion,
+  );
+
+  for (let i = 0; i < readme.length; i++) {
+    const element = readme[i];
+    if (element.kind === "text") {
+      const matches = element?.text?.match(relativeUrlRegex) ?? [];
+      for (let key of matches) {
+        if (!matcheDict.has(key)) {
+          if (
+            /^[\"|\']((\.\/|(\.\.\/)+)[\w-_]+\.[\w]{1,5})[\"|\']$/.test(key)
+          ) {
+            let replacement = key.replace(/(^["|']|["|']$)/g, "");
+            if (replacement.startsWith("./")) {
+              replacement = replacement.replace(
+                /^\.\//,
+                `https://github.com/${userName}/${packageName}/raw/${packageName}@${packageVersion}/${packageRoot}/`,
+              );
+            }
+            if (/^(\.\.\/)+/.test(replacement)) {
+              const [relativePath] = Array.from(/^(\.\.\/)+/.exec(replacement));
+              let root = path.normalize(`${packageRoot}/${relativePath}`);
+              root = root === ".\\" ? "" : root;
+              replacement = replacement.replace(
+                /^(\.\.\/)+/,
+                `https://github.com/${userName}/${packageName}/raw/${packageName}@${packageVersion}/${root}`,
+              );
+            }
+
+            matcheDict.set(key, replacement);
+          }
+          if (/^[\(]((\.\/|(\.\.\/)+)[\w-_]+\.[\w]{1,5})[\)]$/.test(key)) {
+            let replacement = key.replace(/(^[\(]|[\)]$)/g, "");
+            if (replacement.startsWith("./")) {
+              replacement = replacement.replace(
+                /^\.\//,
+                `https://github.com/${userName}/${packageName}/blob/${packageName}@${packageVersion}/${packageRoot}/`,
+              );
+            }
+            if (/^(\.\.\/)+/.test(replacement)) {
+              const [relativePath] = Array.from(/^(\.\.\/)+/.exec(replacement));
+              let root = path.normalize(`${packageRoot}/${relativePath}`);
+              root = root === ".\\" ? "" : root;
+              replacement = replacement.replace(
+                /^(\.\.\/)+/,
+                `https://github.com/${userName}/${packageName}/blob/${packageName}@${packageVersion}/${root}`,
+              );
+            }
+
+            matcheDict.set(key, replacement);
+          }
+        }
+      }
+      for (let [stringToReplace, replaceWith] of matcheDict.entries()) {
+        element.text = element?.text?.replaceAll(
+          stringToReplace,
+          stringToReplace.startsWith("(")
+            ? `(${replaceWith})`
+            : `"${replaceWith}"`,
+        );
+      }
+      readme[i] = element;
+    }
+  }
+  obj["readme"] = readme;
+}
 function updateSourceFilename(obj) {
   for (let key in obj) {
     if (typeof obj[key] === "object" && obj[key] !== null) {
@@ -338,6 +435,11 @@ async function convertAndWriteDocs(
     throw new Error("Compile error");
   }
 
+  await updateReadmeRelativeLinks(
+    projectReflection,
+    packageName,
+    packageVersion,
+  );
   convertTimer.done({ message: `created typedoc for ${packageName}` });
 
   let serializedReflection = new Serializer().projectToObject(
