@@ -304,7 +304,6 @@ function setupApp(app: td.Application) {
 }
 
 async function getRepoInfo(packageName = "", packageVersion = "") {
-  let userName = "";
   const npmPackageInfo = await fetch(
     `https://registry.npmjs.org/${packageName}/${packageVersion}`,
   );
@@ -312,14 +311,74 @@ async function getRepoInfo(packageName = "", packageVersion = "") {
     repository,
   }: { repository: { type: string; url: string; directory: string } } =
     await npmPackageInfo.json();
-  userName = repository.url
+  const [userName, repo] = repository.url
     .replace(/^(git\+https\:\/\/github.com\/)/, "")
-    .replace(/(\/(\w)+\.git)$/, "");
+    .split("/");
+  const repoName = repo.replace(/(\.git)$/, "");
   return {
     userName,
+    repoName,
     ...repository,
   };
 }
+
+async function getTagsData(userName = "", repoName = "", version = "") {
+  const tagsData = await fetch(
+    `https://api.github.com/repos/${userName}/${repoName}/git/matching-refs/tags`,
+  );
+  const allTags: {
+    ref: string;
+    node_id: string;
+    url: string;
+    object: { sha: string; type: string; url: string };
+  }[] = await tagsData.json();
+  const tag = allTags.find((r) => r.ref.includes(version));
+  return tag?.ref?.replace("refs/tags/", "");
+}
+
+const getReplacementText = (
+  key: string,
+  userName: string,
+  repoName: string,
+  tag: string,
+  packageRoot: string,
+  regexLeftSection = "",
+  regexRightSection = "",
+  type = "blob",
+) => {
+  if (
+    new RegExp(
+      `^[${regexLeftSection}](((\\\.\\\/){0,1}|(\\\.\\\.\\\/)+|([\\\w-_]+\\\/)+)([\\\w-_]+\\\/)*[\\\w-_]+\\\.[\\\w]{1,5})[${regexRightSection}]$`,
+    ).test(key)
+  ) {
+    let replacement = key.replace(
+      new RegExp(`(^[${regexLeftSection}]|[${regexRightSection}]$)`, "g"),
+      "",
+    );
+    if (replacement.startsWith("./")) {
+      replacement = replacement.replace(
+        /^\.\//,
+        `https://github.com/${userName}/${repoName}/${type}/${tag}/${packageRoot}/`,
+      );
+    }
+    if (/^(\.\.\/)+/.test(replacement)) {
+      const [relativePath] = Array.from(/^(\.\.\/)+/.exec(replacement));
+      let root = path.normalize(`${packageRoot}/${relativePath}`);
+      root = root === ".\\" ? "" : root;
+      replacement = replacement.replace(
+        /^(\.\.\/)+/,
+        `https://github.com/${userName}/${repoName}/${type}/${tag}/${root}`,
+      );
+    }
+
+    if (/^([\w-_]+\/)+/.test(replacement)) {
+      replacement = `https://github.com/${userName}/${repoName}/${type}/${tag}/${replacement}`;
+    }
+
+    return replacement;
+  }
+  return null;
+};
 
 async function updateReadmeRelativeLinks(
   obj: td.Models.ProjectReflection,
@@ -327,72 +386,55 @@ async function updateReadmeRelativeLinks(
   packageVersion = "",
 ) {
   const relativeUrlRegex = new RegExp(
-    /(["|'|\()]((\.\/|(\.\.\/)+)[\w-_]+\.[\w]{1,5})["|'|\)])/g,
+    /(["|'|\()](((\.\/){0,1}|(\.\.\/)+|([\w-_]+\/)+)([\w-_]+\/)*[\w-_]+\.[\w]{1,5})["|'|\)])/g,
   );
   let { readme } = obj;
   const matcheDict = new Map<string, string>();
 
-  const { userName, directory: packageRoot } = await getRepoInfo(
-    packageName,
-    packageVersion,
-  );
+  const {
+    userName,
+    repoName,
+    directory: packageRoot = "",
+  } = await getRepoInfo(packageName, packageVersion);
+
+  const tag = await getTagsData(userName, repoName, packageVersion);
 
   for (let i = 0; i < readme.length; i++) {
     const element = readme[i];
     if (element.kind === "text") {
       const matches = element?.text?.match(relativeUrlRegex) ?? [];
       for (let key of matches) {
-        if (!matcheDict.has(key)) {
-          if (
-            /^[\"|\']((\.\/|(\.\.\/)+)[\w-_]+\.[\w]{1,5})[\"|\']$/.test(key)
-          ) {
-            let replacement = key.replace(/(^["|']|["|']$)/g, "");
-            if (replacement.startsWith("./")) {
-              replacement = replacement.replace(
-                /^\.\//,
-                `https://github.com/${userName}/${packageName}/raw/${packageName}@${packageVersion}/${packageRoot}/`,
-              );
-            }
-            if (/^(\.\.\/)+/.test(replacement)) {
-              const [relativePath] = Array.from(/^(\.\.\/)+/.exec(replacement));
-              let root = path.normalize(`${packageRoot}/${relativePath}`);
-              root = root === ".\\" ? "" : root;
-              replacement = replacement.replace(
-                /^(\.\.\/)+/,
-                `https://github.com/${userName}/${packageName}/raw/${packageName}@${packageVersion}/${root}`,
-              );
-            }
-
-            matcheDict.set(key, replacement);
-          }
-          if (/^[\(]((\.\/|(\.\.\/)+)[\w-_]+\.[\w]{1,5})[\)]$/.test(key)) {
-            let replacement = key.replace(/(^[\(]|[\)]$)/g, "");
-            if (replacement.startsWith("./")) {
-              replacement = replacement.replace(
-                /^\.\//,
-                `https://github.com/${userName}/${packageName}/blob/${packageName}@${packageVersion}/${packageRoot}/`,
-              );
-            }
-            if (/^(\.\.\/)+/.test(replacement)) {
-              const [relativePath] = Array.from(/^(\.\.\/)+/.exec(replacement));
-              let root = path.normalize(`${packageRoot}/${relativePath}`);
-              root = root === ".\\" ? "" : root;
-              replacement = replacement.replace(
-                /^(\.\.\/)+/,
-                `https://github.com/${userName}/${packageName}/blob/${packageName}@${packageVersion}/${root}`,
-              );
-            }
-
-            matcheDict.set(key, replacement);
-          }
-        }
+        let replacement = getReplacementText(
+          key,
+          userName,
+          repoName,
+          tag,
+          packageRoot,
+          "\\\"|\\'",
+          "\\\"|\\'",
+          "raw",
+        );
+        if (replacement) matcheDict.set(key, replacement);
+        replacement = getReplacementText(
+          key,
+          userName,
+          repoName,
+          tag,
+          packageRoot,
+          "\\(",
+          "\\)",
+          "blob",
+        );
+        if (replacement) matcheDict.set(key, replacement);
       }
       for (let [stringToReplace, replaceWith] of matcheDict.entries()) {
         element.text = element?.text?.replaceAll(
           stringToReplace,
           stringToReplace.startsWith("(")
             ? `(${replaceWith})`
-            : `"${replaceWith}"`,
+            : stringToReplace.startsWith('"')
+              ? `"${replaceWith}"`
+              : `'${replaceWith}'`,
         );
       }
       readme[i] = element;
