@@ -358,8 +358,11 @@ const getReplacementText = (
     if (replacement.startsWith("./")) {
       replacement = replacement.replace(
         /^\.\//,
-        `https://github.com/${userName}/${repoName}/${type}/${tag}/${packageRoot}/`,
+        `https://github.com/${userName}/${repoName}/${type}/${tag}/${packageRoot}${
+          packageRoot ? "/" : ""
+        }`,
       );
+      return replacement;
     }
     if (/^(\.\.\/)+/.test(replacement)) {
       const [relativePath] = Array.from(/^(\.\.\/)+/.exec(replacement));
@@ -369,13 +372,14 @@ const getReplacementText = (
         /^(\.\.\/)+/,
         `https://github.com/${userName}/${repoName}/${type}/${tag}/${root}`,
       );
+      return replacement;
     }
-
     if (/^([\w-_]+\/)+/.test(replacement)) {
       replacement = `https://github.com/${userName}/${repoName}/${type}/${tag}/${replacement}`;
+      return replacement;
     }
 
-    return replacement;
+    return null;
   }
   return null;
 };
@@ -385,62 +389,66 @@ async function updateReadmeRelativeLinks(
   packageName = "",
   packageVersion = "",
 ) {
-  const relativeUrlRegex = new RegExp(
-    /(["|'|\()](((\.\/){0,1}|(\.\.\/)+|([\w-_]+\/)+)([\w-_]+\/)*[\w-_]+\.[\w]{1,5})["|'|\)])/g,
-  );
-  let { readme } = obj;
-  const matcheDict = new Map<string, string>();
+  try {
+    const relativeUrlRegex = new RegExp(
+      /(["|'|\()](((\.\/){0,1}|(\.\.\/)+|([\w-_]+\/)+)([\w-_]+\/)*[\w-_]+\.[\w]{1,5})["|'|\)])/g,
+    );
+    let { readme } = obj;
+    const matcheDict = new Map<string, string>();
 
-  const {
-    userName,
-    repoName,
-    directory: packageRoot = "",
-  } = await getRepoInfo(packageName, packageVersion);
+    const {
+      userName,
+      repoName,
+      directory: packageRoot = "",
+    } = await getRepoInfo(packageName, packageVersion);
 
-  const tag = await getTagsData(userName, repoName, packageVersion);
+    const tag = await getTagsData(userName, repoName, packageVersion);
 
-  for (let i = 0; i < readme.length; i++) {
-    const element = readme[i];
-    if (element.kind === "text") {
-      const matches = element?.text?.match(relativeUrlRegex) ?? [];
-      for (let key of matches) {
-        let replacement = getReplacementText(
-          key,
-          userName,
-          repoName,
-          tag,
-          packageRoot,
-          "\\\"|\\'",
-          "\\\"|\\'",
-          "raw",
-        );
-        if (replacement) matcheDict.set(key, replacement);
-        replacement = getReplacementText(
-          key,
-          userName,
-          repoName,
-          tag,
-          packageRoot,
-          "\\(",
-          "\\)",
-          "blob",
-        );
-        if (replacement) matcheDict.set(key, replacement);
+    for (let i = 0; i < readme.length; i++) {
+      const element = readme[i];
+      if (element.kind === "text") {
+        const matches = element?.text?.match(relativeUrlRegex) ?? [];
+        for (let key of matches) {
+          let replacement = getReplacementText(
+            key,
+            userName,
+            repoName,
+            tag || "HEAD",
+            packageRoot,
+            "\\\"|\\'",
+            "\\\"|\\'",
+            "raw",
+          );
+          if (replacement) matcheDict.set(key, replacement);
+          replacement = getReplacementText(
+            key,
+            userName,
+            repoName,
+            tag || "HEAD",
+            packageRoot,
+            "\\(",
+            "\\)",
+            "blob",
+          );
+          if (replacement) matcheDict.set(key, replacement);
+        }
+        for (let [stringToReplace, replaceWith] of matcheDict.entries()) {
+          element.text = element?.text?.replaceAll(
+            stringToReplace,
+            stringToReplace.startsWith("(")
+              ? `(${replaceWith})`
+              : stringToReplace.startsWith('"')
+                ? `"${replaceWith}"`
+                : `'${replaceWith}'`,
+          );
+        }
+        readme[i] = element;
       }
-      for (let [stringToReplace, replaceWith] of matcheDict.entries()) {
-        element.text = element?.text?.replaceAll(
-          stringToReplace,
-          stringToReplace.startsWith("(")
-            ? `(${replaceWith})`
-            : stringToReplace.startsWith('"')
-              ? `"${replaceWith}"`
-              : `'${replaceWith}'`,
-        );
-      }
-      readme[i] = element;
     }
+    obj["readme"] = readme;
+  } catch (error) {
+    logger.error(`Couldn't convert relative links: ${error.message}`, error.stack);
   }
-  obj["readme"] = readme;
 }
 function updateSourceFilename(obj) {
   for (let key in obj) {
