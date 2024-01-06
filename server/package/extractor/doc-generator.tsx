@@ -29,6 +29,7 @@ import fs from "fs";
 import { transformCommonJSExport } from "./augment-extract";
 import { DocsCache } from "../DocsCache";
 import { installQueue, installQueueEvents } from "../../queues";
+import { getRepoInfo, getTagsData } from "../../../common/api/repoDetails";
 
 class CustomThemeContext extends DefaultThemeRenderContext {
   _originalNav: any;
@@ -303,36 +304,9 @@ function setupApp(app: td.Application) {
   app.renderer.defineTheme("tsdocs", CustomTheme);
 }
 
-async function getRepoInfo(packageName = "", packageVersion = "") {
-  const npmPackageInfo = await fetch(
-    `https://registry.npmjs.org/${packageName}/${packageVersion}`,
-  );
-  const {
-    repository,
-  }: { repository: { type: string; url: string; directory: string } } =
-    await npmPackageInfo.json();
-  const [userName, repo] = repository.url
-    .replace(/^(git\+https\:\/\/github.com\/)/, "")
-    .split("/");
-  const repoName = repo.replace(/(\.git)$/, "");
-  return {
-    userName,
-    repoName,
-    ...repository,
-  };
-}
-
-async function getTagsData(userName = "", repoName = "", version = "") {
-  const tagsData = await fetch(
-    `https://api.github.com/repos/${userName}/${repoName}/git/matching-refs/tags`,
-  );
-  const allTags: {
-    ref: string;
-    node_id: string;
-    url: string;
-    object: { sha: string; type: string; url: string };
-  }[] = await tagsData.json();
-  const tag = allTags.find((r) => r.ref.includes(version));
+async function getMatchingTag(userName = "", repoName = "", version = "") {
+  const allTags = await getTagsData(userName, repoName);
+  const tag = allTags?.find(r => new RegExp(`((${repoName})|(v))[\\\-\\\_\\\@]{0,1}(${version})`, "i").test(r.ref))
   return tag?.ref?.replace("refs/tags/", "");
 }
 
@@ -397,57 +371,70 @@ async function updateReadmeRelativeLinks(
     const matcheDict = new Map<string, string>();
 
     const {
-      userName,
-      repoName,
+      userName = "",
+      repoName = "",
       directory: packageRoot = "",
-    } = await getRepoInfo(packageName, packageVersion);
+      domain,
+    } = (await getRepoInfo(packageName, packageVersion)) || {};
 
-    const tag = await getTagsData(userName, repoName, packageVersion);
+    if (domain === "github.com" && userName && repoName) {
+      const tag = await getMatchingTag(userName, repoName, packageVersion);
 
-    for (let i = 0; i < readme.length; i++) {
-      const element = readme[i];
-      if (element.kind === "text") {
-        const matches = element?.text?.match(relativeUrlRegex) ?? [];
-        for (let key of matches) {
-          let replacement = getReplacementText(
-            key,
-            userName,
-            repoName,
-            tag || "HEAD",
-            packageRoot,
-            "\\\"|\\'",
-            "\\\"|\\'",
-            "raw",
-          );
-          if (replacement) matcheDict.set(key, replacement);
-          replacement = getReplacementText(
-            key,
-            userName,
-            repoName,
-            tag || "HEAD",
-            packageRoot,
-            "\\(",
-            "\\)",
-            "blob",
-          );
-          if (replacement) matcheDict.set(key, replacement);
+      for (let i = 0; i < readme.length; i++) {
+        const element = readme[i];
+        if (element.kind === "text") {
+          const matches = element?.text?.match(relativeUrlRegex) ?? [];
+          for (let key of matches) {
+            let replacement = getReplacementText(
+              key,
+              userName,
+              repoName,
+              tag || "HEAD",
+              packageRoot,
+              "\\\"|\\'",
+              "\\\"|\\'",
+              "raw",
+            );
+            if (replacement) matcheDict.set(key, replacement);
+            replacement = getReplacementText(
+              key,
+              userName,
+              repoName,
+              tag || "HEAD",
+              packageRoot,
+              "\\(",
+              "\\)",
+              "blob",
+            );
+            if (replacement) matcheDict.set(key, replacement);
+          }
+          for (let [stringToReplace, replaceWith] of matcheDict.entries()) {
+            element.text = element?.text?.replaceAll(
+              stringToReplace,
+              stringToReplace.startsWith("(")
+                ? `(${replaceWith})`
+                : stringToReplace.startsWith('"')
+                  ? `"${replaceWith}"`
+                  : `'${replaceWith}'`,
+            );
+          }
+          readme[i] = element;
         }
-        for (let [stringToReplace, replaceWith] of matcheDict.entries()) {
-          element.text = element?.text?.replaceAll(
-            stringToReplace,
-            stringToReplace.startsWith("(")
-              ? `(${replaceWith})`
-              : stringToReplace.startsWith('"')
-                ? `"${replaceWith}"`
-                : `'${replaceWith}'`,
-          );
-        }
-        readme[i] = element;
       }
+      obj["readme"] = readme;
+    } else {
+      logger.info(
+        `Couldn't generate relative links because of the following reasons:\n1. the repository is not in 'github.com'\n2. 'userName' is empty\n3. 'repoName' is empty`,
+        domain,
+        userName,
+        repoName,
+      );
     }
-    obj["readme"] = readme;
   } catch (error) {
-    logger.error(`Couldn't convert relative links: ${error.message}`, error.stack);
+    logger.error(
+      `Couldn't convert relative links: ${error.message}`,
+      error.stack,
+    );
   }
 }
 function updateSourceFilename(obj) {
